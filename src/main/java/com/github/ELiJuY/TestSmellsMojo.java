@@ -1,4 +1,4 @@
-package es.upm.elias.testsmells;
+package com.github.ELiJuY;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
