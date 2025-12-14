@@ -114,9 +114,6 @@ public class TestSmellsMojo extends AbstractMojo {
         getLog().info("Generated tsDetect input CSV at: " + csvFile.getAbsolutePath());
     }
 
-    /**
-     * Busca un fichero de producción con el mismo nombre que el test (sin Test)
-     */
     private File findProductionFile(File mainDir, String fileName) throws IOException {
 
         List<File> matches = Files.walk(mainDir.toPath())
@@ -128,7 +125,7 @@ public class TestSmellsMojo extends AbstractMojo {
     }
 
     /**
-     * Ejecuta tsDetect CLI y muestra la salida estándar
+     * Ejecuta tsDetect
      */
     private File runTsDetect(File csvInput)
             throws IOException, InterruptedException {
@@ -152,7 +149,7 @@ public class TestSmellsMojo extends AbstractMojo {
         try (BufferedReader reader =
                      new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             while (reader.readLine() != null) {
-                // ignoramos salida cruda
+
             }
         }
 
