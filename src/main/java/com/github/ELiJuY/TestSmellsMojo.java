@@ -9,6 +9,7 @@ import org.apache.maven.project.MavenProject;
 
 import java.io.*;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -37,81 +38,60 @@ public class TestSmellsMojo extends AbstractMojo {
         }
 
         targetDir.mkdirs();
-        File csvFile = new File(targetDir, "testsmells-input.csv");
+        File inputCsv = new File(targetDir, "testsmells-input.csv");
 
         try {
-            generateCsv(testSourceDir, mainSourceDir, csvFile);
-            File csvResult = runTsDetect(csvFile);
-            printTestSmells(csvResult);
+            generateCsv(testSourceDir, mainSourceDir, inputCsv);
 
-            runTsDetect(csvFile);
-        } catch (IOException | InterruptedException e) {
+            File outputCsv = runTsDetect(inputCsv);
+
+            boolean hasSmells = printTestSmells(outputCsv);
+
+            if (hasSmells) {
+                File resultDir = new File(targetDir, "testsmells");
+                resultDir.mkdirs();
+
+                File storedCsv = new File(resultDir, outputCsv.getName());
+                Files.copy(outputCsv.toPath(), storedCsv.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING);
+
+                getLog().info("Test smell report saved at: " + storedCsv.getAbsolutePath());
+            } else {
+                getLog().info("No test smells detected.");
+            }
+
+        } catch (Exception e) {
             throw new MojoExecutionException("Error running tsDetect", e);
         }
     }
 
-    private File extractTsDetectJar() throws IOException {
+    /* ------------------------------------------------------------ */
 
-        File tempJar;
-        try (InputStream in = getClass().getClassLoader()
-                .getResourceAsStream("tsDetect.jar")) {
-
-            if (in == null) {
-                throw new IOException("tsDetect.jar not found in plugin resources");
-            }
-
-            tempJar = File.createTempFile("tsDetect", ".jar");
-            tempJar.deleteOnExit();
-
-            try (FileOutputStream out = new FileOutputStream(tempJar)) {
-                byte[] buffer = new byte[8192];
-                int read;
-                while ((read = in.read(buffer)) != -1) {
-                    out.write(buffer, 0, read);
-                }
-            }
-        }
-
-        return tempJar;
-    }
-
-
-    /**
-     * Genera el CSV requerido por tsDetect:
-     * appName,pathToTestFile,pathToProductionFile
-     */
     private void generateCsv(File testDir, File mainDir, File csvFile) throws IOException {
 
         List<File> testFiles = Files.walk(testDir.toPath())
-                .filter(p -> p.toString().endsWith("Test.java"))
+                .filter(p -> p.toString().endsWith(".java"))
                 .map(java.nio.file.Path::toFile)
                 .collect(Collectors.toList());
 
-        if (testFiles.isEmpty()) {
-            getLog().warn("No test files found ending in *Test.java");
-            return;
-        }
-
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(csvFile))) {
+
             for (File testFile : testFiles) {
 
-                String testName = testFile.getName().replace("Test.java", ".java");
-                File productionFile = findProductionFile(mainDir, testName);
+                File productionFile = findProductionFile(mainDir, testFile.getName());
 
                 writer.write(project.getArtifactId());
                 writer.write(",");
-                writer.write(testFile.getAbsolutePath());
-                writer.write(",");
+                writer.write(testFile.getAbsolutePath().replace("\\", "/"));
 
                 if (productionFile != null) {
-                    writer.write(productionFile.getAbsolutePath());
+                    writer.write(",");
+                    writer.write(productionFile.getAbsolutePath().replace("\\", "/"));
                 }
 
                 writer.newLine();
             }
         }
-
-        getLog().info("Generated tsDetect input CSV at: " + csvFile.getAbsolutePath());
     }
 
     private File findProductionFile(File mainDir, String fileName) throws IOException {
@@ -124,31 +104,53 @@ public class TestSmellsMojo extends AbstractMojo {
         return matches.isEmpty() ? null : matches.get(0);
     }
 
-    /**
-     * Ejecuta tsDetect
-     */
-    private File runTsDetect(File csvInput)
+    /* ------------------------------------------------------------ */
+
+    private File extractTsDetectJar() throws IOException {
+
+        try (InputStream in =
+                     getClass().getClassLoader().getResourceAsStream("tsDetect.jar")) {
+
+            if (in == null) {
+                throw new IOException("tsDetect.jar not found in plugin resources");
+            }
+
+            File tempJar = File.createTempFile("tsDetect", ".jar");
+            tempJar.deleteOnExit();
+
+            try (FileOutputStream out = new FileOutputStream(tempJar)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
+            }
+
+            return tempJar;
+        }
+    }
+
+    private File runTsDetect(File inputCsv)
             throws IOException, InterruptedException {
 
         File tsDetectJar = extractTsDetectJar();
-        File outputCsv = new File(
-                tsDetectJar.getParentFile(),
-                "TestSmellDetectionResults.csv"
-        );
 
         ProcessBuilder pb = new ProcessBuilder(
                 "java",
                 "-jar",
                 tsDetectJar.getAbsolutePath(),
-                csvInput.getAbsolutePath()
+                inputCsv.getAbsolutePath()
         );
 
+        File workDir = inputCsv.getParentFile();
+        pb.directory(workDir);
         pb.redirectErrorStream(true);
+
         Process process = pb.start();
 
-        try (BufferedReader reader =
+        try (BufferedReader r =
                      new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            while (reader.readLine() != null) {
+            while (r.readLine() != null) {
 
             }
         }
@@ -158,20 +160,41 @@ public class TestSmellsMojo extends AbstractMojo {
             throw new IOException("tsDetect exited with code " + exitCode);
         }
 
-        if (!outputCsv.exists()) {
+        File[] outputs = workDir.listFiles((dir, name) ->
+                name.startsWith("Output_TestSmellDetection") && name.endsWith(".csv")
+        );
+
+        if (outputs == null || outputs.length == 0) {
             throw new IOException("tsDetect output CSV not found");
+        }
+
+        // el output de tsDetect más reciente
+        File outputCsv = outputs[0];
+        for (File f : outputs) {
+            if (f.lastModified() > outputCsv.lastModified()) {
+                outputCsv = f;
+            }
         }
 
         return outputCsv;
     }
 
-    private void printTestSmells(File resultCsv) throws IOException {
+
+    /* ------------------------------------------------------------ */
+
+    /**
+     * @return true if any smell is detected
+     */
+    private boolean printTestSmells(File resultCsv) throws IOException {
+
+        boolean smellsFoundGlobal = false;
 
         try (BufferedReader reader = new BufferedReader(new FileReader(resultCsv))) {
 
+            // Leer cabecera
             String headerLine = reader.readLine();
             if (headerLine == null) {
-                return;
+                return false;
             }
 
             String[] headers = headerLine.split(",");
@@ -181,24 +204,46 @@ public class TestSmellsMojo extends AbstractMojo {
 
                 String[] values = line.split(",", -1);
 
-                String testFilePath = values[1];
+                String testFilePath = values[2];
                 String testFileName = new File(testFilePath).getName();
 
-                StringBuilder smells = new StringBuilder();
+                getLog().info("Code smells for file " + testFileName + ":");
 
-                for (int i = 3; i < values.length; i++) {
-                    if ("true".equalsIgnoreCase(values[i])) {
-                        smells.append("  - ").append(headers[i]).append("\n");
+                boolean smellsFoundInTest = false;
+
+                // Los smells empiezan en la columna 7
+                for (int i = 7; i < headers.length && i < values.length; i++) {
+
+                    String smellName = headers[i].trim();
+                    String rawValue = values[i].trim();
+
+                    if (rawValue.isEmpty()) {
+                        continue;
+                    }
+
+                    int count;
+                    try {
+                        count = Integer.parseInt(rawValue);
+                    } catch (NumberFormatException e) {
+                        continue;
+                    }
+
+                    if (count > 0) {
+                        smellsFoundInTest = true;
+                        smellsFoundGlobal = true;
+                        getLog().info(smellName + ": " + count);
                     }
                 }
 
-                if (smells.length() > 0) {
-                    getLog().info("Test file: " + testFileName);
-                    getLog().info(smells.toString());
+                if (!smellsFoundInTest) {
+                    getLog().info("No code smells found.");
                 }
+
+                getLog().info(""); // línea en blanco entre tests
             }
         }
+        return smellsFoundGlobal;
     }
 
-
 }
+
